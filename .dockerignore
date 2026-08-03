@@ -19,3 +19,8 @@ data/
 .env
 docker-compose.yml
 Dockerfile
+coverage.xml
+.coverage
+.coverage.*
+htmlcov/
+sonar-project.properties

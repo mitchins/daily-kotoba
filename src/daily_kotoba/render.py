@@ -176,7 +176,10 @@ def render_card(word: Word, width: int, height: int) -> bytes:
     rows: list[dict] = []
     if not word.is_kana_only:
         reading_font = _get_font(regular, max(1, round(scale * 0.13)))
-        rows.append(_measure_row(draw, [word.reading], reading_font))
+        # Fixed size, so unlike the surface it cannot auto-shrink — clamp instead,
+        # or an unusually long reading would bleed past the edge.
+        reading = _clamp_line(draw, word.reading, reading_font, max_width)
+        rows.append(_measure_row(draw, [reading], reading_font))
 
     surface_lo = max(1, round(scale * 0.12))
     surface_hi = max(surface_lo, round(scale * 0.42))

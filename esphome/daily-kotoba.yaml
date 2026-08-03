@@ -42,6 +42,11 @@ display:
     id: epaper_display
     model: 7.50inv2
     # ... existing pin config ...
+    # MUST be set explicitly: the display default is 1s, which on e-paper means a
+    # full panel refresh every second — it would wreck the battery and age the
+    # panel. 300s keeps the clock roughly accurate; use `never` instead if you
+    # want refreshes driven purely by on_download_finished and a time trigger.
+    update_interval: 300s
     lambda: |-
       auto now = id(ntp_time).now();
       if (!now.is_valid()) { now = id(rtc_time).now(); }

@@ -96,6 +96,16 @@ def test_render_never_bleeds_past_the_canvas_edge(width, height):
 
 
 @pytest.mark.usefixtures("kotoba_settings")
+@pytest.mark.parametrize("width,height", [(760, 300), (800, 480), (96, 48)])
+def test_render_long_reading_does_not_bleed(width, height):
+    # The reading is drawn at a fixed size with no auto-fit, so a short surface
+    # paired with an overlong reading is the case that escapes every other guard.
+    word = _word(surface="一", reading="あ" * 40)
+    img = Image.open(io.BytesIO(render_card(word, width, height)))
+    assert _edge_ink(img) == []
+
+
+@pytest.mark.usefixtures("kotoba_settings")
 def test_render_unbreakable_token_is_ellipsized():
     word = _word(gloss="Pneumonoultramicroscopicsilicovolcanoconiosis" * 3)
     img = Image.open(io.BytesIO(render_card(word, 400, 200)))

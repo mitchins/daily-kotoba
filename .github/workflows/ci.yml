@@ -4,13 +4,25 @@ on:
   pull_request:
   push:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Exposed at job level so the scan step's `if:` can test for it — a fork PR
+      # has no access to the secret and must skip the scan rather than fail.
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Sonar needs full history to attribute issues to authors and to work
+          # out new-code periods; a shallow clone degrades its analysis.
+          fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -36,4 +48,17 @@ jobs:
       - name: pytest
         env:
           KOTOBA_FONT_DIR: /tmp/fonts
-        run: pytest
+        run: |
+          set -o pipefail
+          pytest -rs --cov=daily_kotoba --cov-report=xml --cov-report=term \
+            | tee /tmp/pytest.out
+          # The render/API tests skip themselves when the fonts are missing, so a
+          # broken font step above would still leave the suite green. Fail loudly.
+          if grep -qE "[0-9]+ skipped" /tmp/pytest.out; then
+            echo "::error::Tests were skipped — check the font fetch step."
+            exit 1
+          fi
+
+      - name: SonarQube Scan
+        if: env.SONAR_TOKEN != ''
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1

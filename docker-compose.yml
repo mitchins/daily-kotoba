@@ -1,6 +1,6 @@
 services:
   daily-kotoba:
-    image: ghcr.io/mitchellcurrie/daily-kotoba:latest
+    image: ghcr.io/mitchins/daily-kotoba:latest
     restart: unless-stopped
     ports:
       - "8000:8000"
