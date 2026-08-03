@@ -78,6 +78,6 @@ def reset_engine_cache() -> None:
 
 
 def session_scope(settings: Settings) -> Iterator[Session]:
-    Session_ = get_sessionmaker(settings)
-    with Session_() as session:
+    session_factory = get_sessionmaker(settings)
+    with session_factory() as session:
         yield session

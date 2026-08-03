@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from daily_kotoba.seed import join_words, parse_jlpt_banks
+import pytest
+
+from daily_kotoba.seed import (
+    join_words,
+    parse_jlpt_banks,
+    validate_out_path,
+    validate_source_url,
+)
 
 
 def _freq(reading: str | None, level: str) -> list:
@@ -141,3 +148,42 @@ def test_join_words_pos_mapping_and_verb_variants():
     ]
     rows = join_words(entries, by_pair, by_surface)
     assert rows[0]["pos"] == "verb"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/scriptin/jmdict-simplified/releases/download/x/y.json.zip",
+        "https://api.github.com/repos/a/b/releases/latest",
+        "https://objects.githubusercontent.com/blob",
+    ],
+)
+def test_validate_source_url_allows_github_https(url):
+    assert validate_source_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://github.com/a/b.zip",  # not https
+        "https://evil.example.com/a.zip",  # host not allowed
+        "https://github.com.evil.example/a.zip",  # suffix-confusion attempt
+        "file:///etc/passwd",
+        "/relative/path.zip",
+    ],
+)
+def test_validate_source_url_rejects_everything_else(url):
+    with pytest.raises(ValueError):
+        validate_source_url(url)
+
+
+def test_validate_out_path_resolves_and_requires_db_suffix(tmp_path):
+    resolved = validate_out_path(tmp_path / "sub" / ".." / "seed.db")
+    assert resolved.is_absolute()
+    assert resolved == tmp_path / "seed.db"
+
+
+@pytest.mark.parametrize("bad", ["seed.sqlite", "seed.db?mode=memory", "seed"])
+def test_validate_out_path_rejects_non_db_suffix(tmp_path, bad):
+    with pytest.raises(ValueError):
+        validate_out_path(tmp_path / bad)

@@ -103,6 +103,11 @@ def _word_out(word: Word) -> WordOut:
     )
 
 
+# Both word endpoints surface EmptyPoolError as a 503; declared here so it shows up
+# in the generated OpenAPI schema rather than only in the code path.
+_EMPTY_POOL_RESPONSE = {"description": "No words match the configured JLPT levels."}
+
+
 def _get_today_word(session: Session, settings: Settings) -> tuple[dt.date, Word]:
     day = selection.today()
     try:
@@ -114,7 +119,7 @@ def _get_today_word(session: Session, settings: Settings) -> tuple[dt.date, Word
     return day, word
 
 
-@app.get("/healthz", response_model=HealthOut)
+@app.get("/healthz")
 def healthz(session: Session = Depends(get_session)) -> HealthOut:
     """Read-only: must never mint the day's selection, so an orchestrator probe is inert."""
     settings = get_settings()
@@ -134,7 +139,7 @@ def healthz(session: Session = Depends(get_session)) -> HealthOut:
     )
 
 
-@app.get("/v1/daily.json", response_model=DailyOut)
+@app.get("/v1/daily.json", responses={503: _EMPTY_POOL_RESPONSE})
 def get_daily_json(session: Session = Depends(get_session)) -> DailyOut:
     settings = get_settings()
     day, word = _get_today_word(session, settings)
@@ -149,7 +154,7 @@ def get_daily_json(session: Session = Depends(get_session)) -> DailyOut:
     )
 
 
-@app.get("/v1/daily.png")
+@app.get("/v1/daily.png", responses={503: _EMPTY_POOL_RESPONSE})
 def get_daily_png(
     request: Request,
     w: int = Query(DEFAULT_WIDTH, ge=96, le=800),
@@ -171,7 +176,7 @@ def get_daily_png(
     return Response(content=cached.data, media_type="image/png", headers=headers)
 
 
-@app.get("/v1/history", response_model=list[HistoryItemOut])
+@app.get("/v1/history")
 def get_history(
     limit: int = Query(30, ge=1, le=100), session: Session = Depends(get_session)
 ) -> list[HistoryItemOut]:

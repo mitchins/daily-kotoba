@@ -86,9 +86,9 @@ def test_recycling_wraps_after_pool_exhausted(kotoba_settings, set_today):
         set_today(day3)
         sel3 = selection.get_or_create_selection(session, day3, ["N5"])
 
-        assert {sel1.word_id, sel2.word_id, sel3.word_id} == {
-            w.id for w in session.scalars(select(Word)).all()
-        }
+        selected_ids = {sel1.word_id, sel2.word_id, sel3.word_id}
+        pool_ids = {w.id for w in session.scalars(select(Word)).all()}
+        assert selected_ids == pool_ids
 
         day4 = dt.date(2026, 1, 4)
         set_today(day4)

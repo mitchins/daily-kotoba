@@ -19,6 +19,7 @@ import zipfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import create_engine
@@ -33,6 +34,10 @@ JMDICT_ASSET_PATTERN = re.compile(r"^jmdict-eng-common-.*\.json\.zip$")
 
 JLPT_REPO = "stephenmk/yomitan-jlpt-vocab"
 JLPT_ASSET_PATTERN = re.compile(r"^jlpt\.zip$")
+
+# Release assets are served from these hosts; anything else is a misconfigured or
+# hostile --jmdict-url / --jlpt-url override.
+_ALLOWED_SOURCE_HOSTS = frozenset({"github.com", "api.github.com", "objects.githubusercontent.com"})
 
 # The JLPT has not published official vocabulary lists since 2010; "level" here is a
 # well-regarded community reconstruction (Jonathan Waller's list), not authoritative.
@@ -72,14 +77,60 @@ def resolve_latest_asset(
     raise RuntimeError(f"no asset matching {pattern.pattern!r} in {repo}'s latest release")
 
 
+def validate_source_url(url: str) -> str:
+    """Confine the `--jmdict-url` / `--jlpt-url` overrides to HTTPS on GitHub.
+
+    These flags exist to pin or sideload a release asset, not to point the seeder at
+    an arbitrary host: whatever they fetch is parsed and baked into the shipped image.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"source URL must be https, got {parsed.scheme or 'no scheme'}: {url}")
+    if parsed.hostname not in _ALLOWED_SOURCE_HOSTS:
+        raise ValueError(
+            f"source host {parsed.hostname!r} is not allowed "
+            f"(expected one of {sorted(_ALLOWED_SOURCE_HOSTS)})"
+        )
+    return url
+
+
+def validate_out_path(path: Path) -> Path:
+    """Resolve `--out` to an absolute .db path.
+
+    Resolving first means the value handed to create_engine() is a plain filesystem
+    path, with no room for relative-traversal or connection-string trickery.
+    """
+    resolved = path.expanduser().resolve()
+    if resolved.suffix != ".db":
+        raise ValueError(f"--out must end in .db, got {resolved}")
+    return resolved
+
+
 def _download_zip(url: str, client: httpx.Client) -> zipfile.ZipFile:
-    resp = client.get(url)
+    resp = client.get(validate_source_url(url))
     resp.raise_for_status()
     return zipfile.ZipFile(io.BytesIO(resp.content))
 
 
 def _easier(a: str, b: str) -> str:
     return a if _LEVEL_RANK[a] > _LEVEL_RANK[b] else b
+
+
+def _bank_entry(entry: list[Any]) -> tuple[str, str | None, str] | None:
+    """Unpack one yomitan term_meta_bank row into (surface, reading, level),
+    or None if it is not a usable JLPT frequency entry."""
+    surface, meta = entry[0], entry[2]
+    freq = meta.get("frequency") if isinstance(meta, dict) else None
+    if not isinstance(freq, dict):
+        return None
+    level = freq.get("displayValue")
+    if level not in _LEVEL_RANK:
+        return None
+    return surface, meta.get("reading"), level
+
+
+def _merge_easiest(target: dict[Any, str], key: Any, level: str) -> None:
+    target[key] = _easier(level, target[key]) if key in target else level
 
 
 def parse_jlpt_banks(
@@ -92,23 +143,13 @@ def parse_jlpt_banks(
 
     for bank in banks:
         for entry in bank:
-            surface, _kind, meta = entry[0], entry[1], entry[2]
-            freq = meta.get("frequency") if isinstance(meta, dict) else None
-            if not isinstance(freq, dict):
+            parsed = _bank_entry(entry)
+            if parsed is None:
                 continue
-            level = freq.get("displayValue")
-            if level not in _LEVEL_RANK:
-                continue
-
-            if surface in by_surface:
-                by_surface[surface] = _easier(level, by_surface[surface])
-            else:
-                by_surface[surface] = level
-
-            reading = meta.get("reading")
+            surface, reading, level = parsed
+            _merge_easiest(by_surface, surface, level)
             if reading:
-                key = (surface, reading)
-                by_pair[key] = _easier(level, by_pair[key]) if key in by_pair else level
+                _merge_easiest(by_pair, (surface, reading), level)
 
     return by_pair, by_surface
 
@@ -130,6 +171,79 @@ def _truncate_gloss(text: str, limit: int = 100) -> str:
     return cut.rstrip(" ,;") + "…"
 
 
+def _sort_key(seq: str) -> int:
+    """Deterministic pseudo-random ordering key. blake2b gives an unsigned 64-bit
+    spread; SQLite INTEGER is signed 64-bit, so reinterpret the top half as negative
+    (two's complement) rather than losing entries to an OverflowError. Only the
+    shuffle order matters here, not the sign."""
+    raw = int.from_bytes(hashlib.blake2b(seq.encode(), digest_size=8).digest(), "big")
+    return raw - 2**64 if raw >= 2**63 else raw
+
+
+def _headwords(entry: dict[str, Any]) -> tuple[str, str, bool] | None:
+    """Pick (surface, reading, is_kana_only), preferring entries flagged common."""
+    kana = entry.get("kana") or []
+    if not kana:
+        return None
+    kanji = entry.get("kanji") or []
+    reading = next((k["text"] for k in kana if k.get("common")), kana[0]["text"])
+    if not kanji:
+        return reading, reading, True
+    surface = next((k["text"] for k in kanji if k.get("common")), kanji[0]["text"])
+    return surface, reading, False
+
+
+def _first_sense(entry: dict[str, Any]) -> tuple[str, str | None] | None:
+    """Shape the first sense into (gloss, pos), or None if it should be dropped."""
+    senses = entry.get("sense") or []
+    if not senses:
+        return None
+    sense0 = senses[0]
+    if set(sense0.get("misc") or []) & _ARCHAIC_MISC:
+        return None
+
+    gloss_texts = [g["text"] for g in (sense0.get("gloss") or []) if g.get("lang", "eng") == "eng"][
+        :3
+    ]
+    if not gloss_texts:
+        return None
+
+    pos_tags = sense0.get("partOfSpeech") or []
+    return _truncate_gloss(", ".join(gloss_texts)), (_map_pos(pos_tags[0]) if pos_tags else None)
+
+
+def _build_row(
+    entry: dict[str, Any],
+    by_pair: dict[tuple[str, str], str],
+    by_surface: dict[str, str],
+) -> dict[str, Any] | None:
+    heads = _headwords(entry)
+    if heads is None:
+        return None
+    surface, reading, is_kana_only = heads
+
+    level = by_pair.get((surface, reading)) or by_surface.get(surface)
+    if level is None:
+        return None
+
+    sense = _first_sense(entry)
+    if sense is None:
+        return None
+    gloss, pos = sense
+
+    seq = str(entry["id"])
+    return {
+        "seq": seq,
+        "surface": surface,
+        "reading": reading,
+        "is_kana_only": is_kana_only,
+        "gloss": gloss,
+        "pos": pos,
+        "jlpt": level,
+        "sort_key": _sort_key(seq),
+    }
+
+
 def join_words(
     jmdict_entries: Iterable[dict[str, Any]],
     by_pair: dict[tuple[str, str], str],
@@ -137,64 +251,8 @@ def join_words(
 ) -> list[dict[str, Any]]:
     """Join JMdict entries against the JLPT lookups, applying the filtering/shaping
     rules in spec section 2.3. Returns plain dicts ready for `Word(**row)`."""
-    rows: list[dict[str, Any]] = []
-
-    for entry in jmdict_entries:
-        kana = entry.get("kana") or []
-        kanji = entry.get("kanji") or []
-        if not kana:
-            continue
-
-        reading = next((k["text"] for k in kana if k.get("common")), kana[0]["text"])
-        is_kana_only = not kanji
-        if kanji:
-            surface = next((k["text"] for k in kanji if k.get("common")), kanji[0]["text"])
-        else:
-            surface = reading
-
-        level = by_pair.get((surface, reading)) or by_surface.get(surface)
-        if level is None:
-            continue
-
-        senses = entry.get("sense") or []
-        if not senses:
-            continue
-        sense0 = senses[0]
-
-        if set(sense0.get("misc") or []) & _ARCHAIC_MISC:
-            continue
-
-        gloss_texts = [
-            g["text"] for g in (sense0.get("gloss") or []) if g.get("lang", "eng") == "eng"
-        ][:3]
-        if not gloss_texts:
-            continue
-        gloss = _truncate_gloss(", ".join(gloss_texts))
-
-        pos_tags = sense0.get("partOfSpeech") or []
-        pos = _map_pos(pos_tags[0]) if pos_tags else None
-
-        seq = str(entry["id"])
-        # blake2b gives an unsigned 64-bit spread; SQLite INTEGER is signed 64-bit, so
-        # reinterpret the top half as negative (two's complement) rather than losing
-        # entries to an OverflowError. Only the deterministic shuffle order matters here.
-        raw = int.from_bytes(hashlib.blake2b(seq.encode(), digest_size=8).digest(), "big")
-        sort_key = raw - 2**64 if raw >= 2**63 else raw
-
-        rows.append(
-            {
-                "seq": seq,
-                "surface": surface,
-                "reading": reading,
-                "is_kana_only": is_kana_only,
-                "gloss": gloss,
-                "pos": pos,
-                "jlpt": level,
-                "sort_key": sort_key,
-            }
-        )
-
-    return rows
+    rows = (_build_row(entry, by_pair, by_surface) for entry in jmdict_entries)
+    return [row for row in rows if row is not None]
 
 
 def _summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -205,9 +263,12 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def write_db(out_path: Path, rows: list[dict[str, Any]], jmdict_tag: str, jlpt_tag: str) -> None:
+    out_path = validate_out_path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.unlink(missing_ok=True)
 
+    # Built from an absolute, suffix-checked path so no CLI value can smuggle query
+    # parameters (e.g. ?mode=memory) into the connection URL.
     engine = create_engine(f"sqlite:///{out_path}")
     Base.metadata.create_all(engine)
 
@@ -282,7 +343,16 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    sys.exit(run(args.out, args.jmdict_url, args.jlpt_url))
+    try:
+        # Validate up front so a bad argument fails before downloading ~10 MB.
+        out = validate_out_path(args.out)
+        for override in (args.jmdict_url, args.jlpt_url):
+            if override:
+                validate_source_url(override)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    sys.exit(run(out, args.jmdict_url, args.jlpt_url))
 
 
 if __name__ == "__main__":
