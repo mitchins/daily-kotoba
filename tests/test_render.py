@@ -109,4 +109,9 @@ def test_render_long_reading_does_not_bleed(width, height):
 def test_render_unbreakable_token_is_ellipsized():
     word = _word(gloss="Pneumonoultramicroscopicsilicovolcanoconiosis" * 3)
     img = Image.open(io.BytesIO(render_card(word, 400, 200)))
+    ellipsis_img = Image.open(io.BytesIO(render_card(_word(gloss="…"), 400, 200)))
+    blank_img = Image.open(io.BytesIO(render_card(_word(gloss=""), 400, 200)))
+
+    assert img.tobytes() == ellipsis_img.tobytes()
+    assert img.tobytes() != blank_img.tobytes()
     assert _edge_ink(img) == []
