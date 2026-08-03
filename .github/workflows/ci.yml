@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project
+        run: pip install -e ".[dev]"
+
+      - name: Fetch fonts for render tests (checksum-verified)
+        run: |
+          mkdir -p /tmp/fonts
+          curl -fsSL -o /tmp/fonts/NotoSansJP-Regular.otf \
+            https://github.com/notofonts/noto-cjk/raw/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf
+          curl -fsSL -o /tmp/fonts/NotoSansJP-Bold.otf \
+            https://github.com/notofonts/noto-cjk/raw/165c01b46ea533872e002e0785ff17e44f6d97d8/Sans/SubsetOTF/JP/NotoSansJP-Bold.otf
+          echo "dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073  /tmp/fonts/NotoSansJP-Regular.otf" | sha256sum -c -
+          echo "1b0edfb500b73a4fa8a4fcaae1bbbd403994e08e73e3e0da37e70d3853f42c5f  /tmp/fonts/NotoSansJP-Bold.otf" | sha256sum -c -
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: pytest
+        env:
+          KOTOBA_FONT_DIR: /tmp/fonts
+        run: pytest
