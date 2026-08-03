@@ -1,0 +1,38 @@
+daily-kotoba — third-party attribution
+
+This project's code (everything under src/, tests/, esphome/, and the Docker/CI
+config) is © Mitchell Currie and licensed under the MIT license — see LICENSE.
+
+The bundled word database (kotoba-seed.db, built at Docker image build time) is a
+derivative work of the two CC BY-SA 4.0 data sources below, and is therefore itself
+distributed under CC BY-SA 4.0 — NOT MIT. Keep that split in mind if you redistribute
+a built image or the seed DB on its own.
+
+--------------------------------------------------------------------------------
+
+JMdict
+  © Electronic Dictionary Research and Development Group (EDRDG), used under
+  CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0/).
+  Consumed via the scriptin/jmdict-simplified project
+  (https://github.com/scriptin/jmdict-simplified), which republishes JMdict as
+  structured JSON under the same license.
+
+JLPT vocabulary levels
+  © Stephen Kraus, used under CC BY-SA 4.0. Sourced from
+  stephenmk/yomitan-jlpt-vocab (https://github.com/stephenmk/yomitan-jlpt-vocab),
+  a Yomitan-format packaging of Jonathan Waller's JLPT vocabulary list. The JLPT
+  has not published official vocabulary lists since 2010, so the levels here are a
+  well-regarded community reconstruction, not an authoritative source.
+
+Noto Sans JP
+  © Google Inc., licensed under the SIL Open Font License, Version 1.1
+  (https://openfontlicense.org/). Fetched at Docker build time from the
+  notofonts/noto-cjk repository (subset static OTFs, pinned to a specific commit —
+  see the Dockerfile), never vendored into this repository.
+
+--------------------------------------------------------------------------------
+
+SIL Open Font License summary: the font may be used, studied, modified, and
+redistributed freely, including bundled with this software, provided it is not sold
+by itself and any modified versions are renamed. See the license text at the URL
+above for the authoritative terms.
