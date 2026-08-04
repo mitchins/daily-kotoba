@@ -13,8 +13,10 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import sys
+import tempfile
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -23,6 +25,7 @@ from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session
 
 from daily_kotoba.models import Base, Meta, Word
@@ -62,6 +65,10 @@ _POS_MAP = {
 }
 
 MIN_WORDS_PER_LEVEL = 100
+
+MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_ZIP_ENTRIES = 100
 
 
 def resolve_latest_asset(
@@ -107,9 +114,30 @@ def validate_out_path(path: Path) -> Path:
 
 
 def _download_zip(url: str, client: httpx.Client) -> zipfile.ZipFile:
-    resp = client.get(validate_source_url(url))
-    resp.raise_for_status()
-    return zipfile.ZipFile(io.BytesIO(resp.content))
+    """Stream the archive under a size cap and reject implausible ZIPs.
+
+    The real assets are ~1 MB compressed / ~50 MB expanded. The caps are generous
+    multiples of that, so they only fire on a corrupt release or a decompression
+    bomb — either of which would otherwise OOM the Docker build.
+    """
+    buf = io.BytesIO()
+    with client.stream("GET", validate_source_url(url)) as resp:
+        resp.raise_for_status()
+        for chunk in resp.iter_bytes():
+            buf.write(chunk)
+            if buf.tell() > MAX_DOWNLOAD_BYTES:
+                raise RuntimeError(f"{url} exceeds the {MAX_DOWNLOAD_BYTES} byte download limit")
+
+    archive = zipfile.ZipFile(buf)
+    infos = archive.infolist()
+    if len(infos) > MAX_ZIP_ENTRIES:
+        raise RuntimeError(f"{url} has {len(infos)} entries, over the {MAX_ZIP_ENTRIES} limit")
+    total = sum(info.file_size for info in infos)
+    if total > MAX_UNCOMPRESSED_BYTES:
+        raise RuntimeError(
+            f"{url} expands to {total} bytes, over the {MAX_UNCOMPRESSED_BYTES} limit"
+        )
+    return archive
 
 
 def _easier(a: str, b: str) -> str:
@@ -265,26 +293,37 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
 def write_db(out_path: Path, rows: list[dict[str, Any]], jmdict_tag: str, jlpt_tag: str) -> None:
     out_path = validate_out_path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.unlink(missing_ok=True)
 
-    # Built from an absolute, suffix-checked path so no CLI value can smuggle query
-    # parameters (e.g. ?mode=memory) into the connection URL.
-    engine = create_engine(f"sqlite:///{out_path}")
-    Base.metadata.create_all(engine)
+    # Build into a sibling temp file and swap it in, so a failure part-way through
+    # leaves any existing DB untouched rather than deleting it up front and
+    # stranding a half-written file for the Docker build to COPY.
+    fd, tmp_name = tempfile.mkstemp(dir=out_path.parent, prefix=".seed-", suffix=".db")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
 
-    with Session(engine) as session:
-        session.add_all(Word(**row) for row in rows)
-        session.add_all(
-            [
-                Meta(key="jmdict_tag", value=jmdict_tag),
-                Meta(key="jlpt_tag", value=jlpt_tag),
-                Meta(key="seeded_at", value=dt.datetime.now(dt.UTC).isoformat()),
-                Meta(key="schema_version", value="1"),
-            ]
-        )
-        session.commit()
-
-    engine.dispose()
+    try:
+        # URL.create rather than an f-string: SQLAlchemy parses "sqlite:///<path>" as a
+        # URL, so a "?" anywhere in the path would silently truncate the database name.
+        engine = create_engine(URL.create("sqlite", database=str(tmp_path)))
+        try:
+            Base.metadata.create_all(engine)
+            with Session(engine) as session:
+                session.add_all(Word(**row) for row in rows)
+                session.add_all(
+                    [
+                        Meta(key="jmdict_tag", value=jmdict_tag),
+                        Meta(key="jlpt_tag", value=jlpt_tag),
+                        Meta(key="seeded_at", value=dt.datetime.now(dt.UTC).isoformat()),
+                        Meta(key="schema_version", value="1"),
+                    ]
+                )
+                session.commit()
+        finally:
+            engine.dispose()
+        os.replace(tmp_path, out_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def run(out: Path, jmdict_url: str | None, jlpt_url: str | None) -> int:
