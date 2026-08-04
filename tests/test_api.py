@@ -165,3 +165,34 @@ def test_cache_eviction_keeps_the_most_recent_entries(client, seeded_db):
     last = 300 + MAX_ENTRIES_PER_DAY + 9
     assert any(str(last) in n for n in names)  # newest survived
     assert not any(f"{300}x200-" in n for n in names)  # oldest evicted
+
+
+def test_cache_read_survives_concurrent_eviction(client, seeded_db, monkeypatch):
+    """A cache hit must not 500 when the entry is evicted mid-request.
+
+    The window is real: _enforce_day_quota runs inside whichever request happens to
+    be writing, so it can unlink an entry another request is already serving. This
+    patches Path.read_bytes rather than any internal helper, so it fails against an
+    implementation that checks existence and then reads.
+    """
+    client.get("/v1/daily.png?w=310&h=210")  # populate the entry
+
+    real_read_bytes = Path.read_bytes
+    fired = {"done": False}
+
+    def vanishing_read(self):
+        # First read of a cached PNG behaves as if a concurrent quota sweep just
+        # unlinked it, which is precisely the TOCTOU window.
+        if not fired["done"] and self.suffix == ".png":
+            fired["done"] = True
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", vanishing_read)
+
+    r = client.get("/v1/daily.png?w=310&h=210")
+    assert fired["done"], "the simulated eviction never triggered"
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert len(r.content) > 0
+    assert r.headers["ETag"] and r.headers["Last-Modified"]

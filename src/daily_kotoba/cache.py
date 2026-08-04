@@ -38,6 +38,20 @@ def _cache_path(cache_dir: Path, day: dt.date, width: int, height: int, title: T
     return _day_dir(cache_dir, day) / f"{width}x{height}{suffix}-v{RENDER_VERSION}.png"
 
 
+def _read_cached(path: Path) -> tuple[bytes, dt.datetime] | None:
+    """Read a cache entry and its mtime, or None if it is not there.
+
+    Both operations must tolerate the file vanishing mid-flight: the per-day quota
+    is enforced by whichever request happens to be writing, so a concurrent worker
+    can unlink an entry another request is in the middle of serving.
+    """
+    try:
+        data = path.read_bytes()
+        return data, dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.UTC)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+
+
 def _enforce_day_quota(day_dir: Path, keep: Path) -> None:
     """Cap the number of entries in a single day's directory, evicting oldest-first.
 
@@ -92,8 +106,12 @@ def get_or_render(
 ) -> CachedImage:
     path = _cache_path(cache_dir, day, width, height, title)
 
-    if path.exists():
-        data = path.read_bytes()
+    # No exists() check: it would be a TOCTOU gap. A concurrent request can trip the
+    # per-day quota and evict this very file between the check and the read, so the
+    # only safe test is the read itself. Same for the stat() that follows.
+    hit = _read_cached(path)
+    if hit is not None:
+        data, mtime = hit
     else:
         data = render_card(word, width, height, title)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +120,10 @@ def get_or_render(
         os.replace(tmp, path)  # atomic within the same directory
         _enforce_day_quota(path.parent, path)
         _prune(cache_dir, keep_days, day)
+        # Re-stat rather than assume the file survived; falling back to "now" is
+        # accurate anyway, since we just rendered these bytes.
+        written = _read_cached(path)
+        mtime = written[1] if written else dt.datetime.now(dt.UTC)
 
     etag = '"' + hashlib.sha256(data).hexdigest()[:32] + '"'
-    mtime = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.UTC)
     return CachedImage(data=data, etag=etag, last_modified=mtime)

@@ -182,44 +182,52 @@ def _stack_height(rows: list[dict], gap: int) -> int:
     return sum(r["total"] for r in rows) + gap * max(0, len(rows) - 1)
 
 
-def render_card(word: Word, width: int, height: int, title: TitleStyle = TitleStyle.NONE) -> bytes:
-    # Type is scaled by `scale`, not raw height: an extreme aspect ratio the size
-    # guards still permit (e.g. 96x480) would otherwise pick ~48px text for a 38px
-    # line box, leaving nothing that fits — not even the ellipsis. Both factors are
-    # loose enough that every sane card size is unaffected.
-    scale = min(height, round(width * 0.7))
-    p = max(1, round(min(width, height) * 0.06))
-    canvas = Image.new("L", (width, height), 255)
-    draw = ImageDraw.Draw(canvas)
+def _draw_header(
+    draw: ImageDraw.ImageDraw,
+    word: Word,
+    title: TitleStyle,
+    bold: Path,
+    scale: int,
+    pad: int,
+    width: int,
+) -> int:
+    """Draw the JLPT badge (top-right) and the optional title (top-left).
 
-    regular = fonts.regular_path()
-    bold = fonts.bold_path()
-    max_width = width - 2 * p
-
-    # --- badge (top-right) -------------------------------------------------
+    Returns the header height so the body knows where it may start. The title lives
+    in the image rather than the display lambda so it can carry CJK — the firmware
+    has no kanji glyphs, which is the whole reason this card is an image at all.
+    """
     badge_size = max(1, round(scale * 0.09))
     badge_font = _get_font(bold, badge_size)
     badge_pad = max(1, round(scale * 0.02))
     bbox = draw.textbbox((0, 0), word.jlpt, font=badge_font, anchor="la")
     box_w = (bbox[2] - bbox[0]) + 2 * badge_pad
     box_h = (bbox[3] - bbox[1]) + 2 * badge_pad
-    bx1, by0 = width - p, p
+    bx1, by0 = width - pad, pad
     bx0, by1 = bx1 - box_w, by0 + box_h
     draw.rounded_rectangle(
         [bx0, by0, bx1, by1], radius=max(2, round(box_h * 0.25)), outline=0, width=2
     )
     draw.text(((bx0 + bx1) / 2, (by0 + by1) / 2), word.jlpt, font=badge_font, fill=0, anchor="mm")
 
-    # --- optional title (top-left, centred against the badge) ------------------
-    # Rendered here rather than in the display lambda so it can carry CJK: the
-    # firmware has no kanji glyphs, which is the whole reason this card is an image.
     title_text = _TITLE_TEXT[title]
     if title_text:
         title_font = _get_font(bold, badge_size)
-        title_text = _clamp_line(draw, title_text, title_font, bx0 - 2 * p)
-        draw.text((p, (by0 + by1) / 2), title_text, font=title_font, fill=0, anchor="lm")
+        title_text = _clamp_line(draw, title_text, title_font, bx0 - 2 * pad)
+        draw.text((pad, (by0 + by1) / 2), title_text, font=title_font, fill=0, anchor="lm")
 
-    # --- reading + surface ---------------------------------------------------
+    return box_h
+
+
+def _build_rows(
+    draw: ImageDraw.ImageDraw,
+    word: Word,
+    regular: Path,
+    bold: Path,
+    scale: int,
+    max_width: int,
+) -> tuple[list[dict], dict, dict | None, int, int]:
+    """Measure every body row at its preferred size, before any fitting."""
     rows: list[dict] = []
     if not word.is_kana_only:
         reading_font = _get_font(regular, max(1, round(scale * 0.13)))
@@ -231,60 +239,79 @@ def render_card(word: Word, width: int, height: int, title: TitleStyle = TitleSt
     surface_lo = max(1, round(scale * 0.12))
     surface_hi = max(surface_lo, round(scale * 0.36))
     surface_size = _fit_surface_size(draw, word.surface, bold, surface_lo, surface_hi, max_width)
-    surface_row = _measure_row(draw, [word.surface], _get_font(bold, surface_size))
-    rows.append(surface_row)
+    rows.append(_measure_row(draw, [word.surface], _get_font(bold, surface_size)))
 
-    # --- gloss (shrinkable) + pos (droppable) --------------------------------
-    gloss_size = _snap_sharp(max(1, round(scale * 0.135)))
-    gloss_min_size = max(1, round(scale * 0.08))
-
-    def build_gloss(size: int) -> dict:
-        # Bold: the gloss competes with Inter@700 elsewhere on the board.
-        font = _get_font(bold, size)
-        lines = _wrap_gloss(draw, word.gloss, font, max_width)
-        return _measure_row(draw, lines, font)
-
-    gloss_row = build_gloss(gloss_size)
+    gloss_row = _build_gloss(draw, word, bold, _snap_sharp(max(1, round(scale * 0.135))), max_width)
 
     pos_row: dict | None = None
     if word.pos:
         pos_font = _get_font(regular, _snap_sharp(max(1, round(scale * 0.10))))
         pos_row = _measure_row(draw, [f"({word.pos})"], pos_font)
 
-    gap = max(1, round(scale * 0.03))
-    body_top = p + box_h + gap
-    body_bottom = height - p
-    available = max(0, body_bottom - body_top)
+    return rows, gloss_row, pos_row, surface_size, surface_lo
+
+
+def _build_gloss(
+    draw: ImageDraw.ImageDraw, word: Word, bold: Path, size: int, max_width: int
+) -> dict:
+    # Bold: the gloss competes with Inter@700 elsewhere on the board.
+    font = _get_font(bold, size)
+    return _measure_row(draw, _wrap_gloss(draw, word.gloss, font, max_width), font)
+
+
+def _fit_rows(
+    draw: ImageDraw.ImageDraw,
+    word: Word,
+    bold: Path,
+    rows: list[dict],
+    gloss_row: dict,
+    pos_row: dict | None,
+    surface_size: int,
+    surface_lo: int,
+    scale: int,
+    max_width: int,
+    gap: int,
+    available: int,
+) -> list[dict]:
+    """Shrink the gloss, then the surface, then drop the POS line until the stack
+    fits. Order matters: a few points off the surface is a smaller visual hit than
+    losing the POS line outright. "Never clip" is the non-negotiable part.
+    """
 
     def all_rows() -> list[dict]:
         return [*rows, gloss_row, *([pos_row] if pos_row else [])]
 
-    # Degrade order per spec: shrink the gloss first, then drop the POS line — but a
-    # few points off the surface is a smaller visual hit than losing the POS line
-    # outright, so it's tried first as a narrow safety net (e.g. a very short surface
-    # that auto-fit maxed out at height*0.42, missing the budget by just a few px).
-    # "Never clip" is the one non-negotiable part of this ordering.
-    size = gloss_size
-    while _stack_height(all_rows(), gap) > available and size > gloss_min_size:
-        # Stop *before* stepping below the ladder floor: _snap_sharp passes through
-        # unmeasured sizes below it, and rendering one of those defeats the point.
-        if size <= _SHARP_SIZES[0]:
-            break
-        size = _snap_sharp(size - 1)  # step down the ladder, not by raw pixels
-        gloss_row = build_gloss(size)
+    gloss_min = max(1, round(scale * 0.08))
+    size = gloss_row["font"].size
+    # `size > _SHARP_SIZES[0]` keeps the gloss on the measured ladder: _snap_sharp
+    # passes unmeasured sizes through below the floor, and rendering one of those
+    # defeats the point of snapping at all.
+    while (
+        _stack_height(all_rows(), gap) > available and size > gloss_min and size > _SHARP_SIZES[0]
+    ):
+        size = _snap_sharp(size - 1)
+        gloss_row = _build_gloss(draw, word, bold, size, max_width)
 
     while _stack_height(all_rows(), gap) > available and surface_size > surface_lo:
         surface_size -= 1
-        surface_row = _measure_row(draw, [word.surface], _get_font(bold, surface_size))
-        rows[-1] = surface_row
+        rows[-1] = _measure_row(draw, [word.surface], _get_font(bold, surface_size))
 
     if _stack_height(all_rows(), gap) > available and pos_row is not None:
         pos_row = None
 
-    final_rows = all_rows()
+    return all_rows()
+
+
+def _paint_rows(
+    draw: ImageDraw.ImageDraw,
+    final_rows: list[dict],
+    width: int,
+    body_top: int,
+    available: int,
+    gap: int,
+) -> None:
     stack_h = _stack_height(final_rows, gap)
     y = body_top + max(0.0, (available - stack_h) / 2) if available > stack_h else body_top
-
     for row in final_rows:
         cursor = y
         for i, line in enumerate(row["lines"]):
@@ -292,6 +319,47 @@ def render_card(word: Word, width: int, height: int, title: TitleStyle = TitleSt
             draw.text((width / 2, cursor + h / 2), line, font=row["font"], fill=0, anchor="mm")
             cursor += h + row["inter"]
         y += row["total"] + gap
+
+
+def render_card(word: Word, width: int, height: int, title: TitleStyle = TitleStyle.NONE) -> bytes:
+    # Type is scaled by `scale`, not raw height: an extreme aspect ratio the size
+    # guards still permit (e.g. 96x480) would otherwise pick ~48px text for a 38px
+    # line box, leaving nothing that fits — not even the ellipsis. Both factors are
+    # loose enough that every sane card size is unaffected.
+    scale = min(height, round(width * 0.7))
+    pad = max(1, round(min(width, height) * 0.06))
+    canvas = Image.new("L", (width, height), 255)
+    draw = ImageDraw.Draw(canvas)
+
+    regular = fonts.regular_path()
+    bold = fonts.bold_path()
+    max_width = width - 2 * pad
+
+    box_h = _draw_header(draw, word, title, bold, scale, pad, width)
+
+    rows, gloss_row, pos_row, surface_size, surface_lo = _build_rows(
+        draw, word, regular, bold, scale, max_width
+    )
+
+    gap = max(1, round(scale * 0.03))
+    body_top = pad + box_h + gap
+    available = max(0, (height - pad) - body_top)
+
+    final_rows = _fit_rows(
+        draw,
+        word,
+        bold,
+        rows,
+        gloss_row,
+        pos_row,
+        surface_size,
+        surface_lo,
+        scale,
+        max_width,
+        gap,
+        available,
+    )
+    _paint_rows(draw, final_rows, width, body_top, available, gap)
 
     # Hard threshold, never dithered: text on a 1-bit e-paper panel needs crisp edges.
     bw = canvas.point(lambda v: 255 if v >= 128 else 0, mode="1")
