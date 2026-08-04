@@ -8,6 +8,7 @@ mud; a hard threshold keeps glyph edges crisp.
 from __future__ import annotations
 
 import io
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,27 @@ if TYPE_CHECKING:
 
 # Bump whenever the layout changes; cache.py folds this into the cache path so stale
 # rendered art can never survive a deploy.
-RENDER_VERSION = 4
+RENDER_VERSION = 5
+
+
+class TitleStyle(StrEnum):
+    """Which heading to draw opposite the JLPT badge.
+
+    A closed set rather than free text: the rendered PNG is cached to disk, so an
+    open-ended parameter would let callers mint unbounded cache entries, and it is
+    not something a caller has any reason to choose freely.
+    """
+
+    NONE = "none"
+    JA = "ja"
+    EN = "en"
+
+
+_TITLE_TEXT: dict[TitleStyle, str | None] = {
+    TitleStyle.NONE: None,
+    TitleStyle.JA: "日本語",
+    TitleStyle.EN: "JAPANESE",
+}
 
 _font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 
@@ -161,7 +182,7 @@ def _stack_height(rows: list[dict], gap: int) -> int:
     return sum(r["total"] for r in rows) + gap * max(0, len(rows) - 1)
 
 
-def render_card(word: Word, width: int, height: int, title: str | None = None) -> bytes:
+def render_card(word: Word, width: int, height: int, title: TitleStyle = TitleStyle.NONE) -> bytes:
     # Type is scaled by `scale`, not raw height: an extreme aspect ratio the size
     # guards still permit (e.g. 96x480) would otherwise pick ~48px text for a 38px
     # line box, leaving nothing that fits — not even the ellipsis. Both factors are
@@ -192,9 +213,10 @@ def render_card(word: Word, width: int, height: int, title: str | None = None) -
     # --- optional title (top-left, centred against the badge) ------------------
     # Rendered here rather than in the display lambda so it can carry CJK: the
     # firmware has no kanji glyphs, which is the whole reason this card is an image.
-    if title:
+    title_text = _TITLE_TEXT[title]
+    if title_text:
         title_font = _get_font(bold, badge_size)
-        title_text = _clamp_line(draw, title, title_font, bx0 - 2 * p)
+        title_text = _clamp_line(draw, title_text, title_font, bx0 - 2 * p)
         draw.text((p, (by0 + by1) / 2), title_text, font=title_font, fill=0, anchor="lm")
 
     # --- reading + surface ---------------------------------------------------
@@ -244,10 +266,12 @@ def render_card(word: Word, width: int, height: int, title: str | None = None) -
     # "Never clip" is the one non-negotiable part of this ordering.
     size = gloss_size
     while _stack_height(all_rows(), gap) > available and size > gloss_min_size:
-        size = _snap_sharp(size - 1)  # step down the ladder, not by raw pixels
-        gloss_row = build_gloss(size)
+        # Stop *before* stepping below the ladder floor: _snap_sharp passes through
+        # unmeasured sizes below it, and rendering one of those defeats the point.
         if size <= _SHARP_SIZES[0]:
             break
+        size = _snap_sharp(size - 1)  # step down the ladder, not by raw pixels
+        gloss_row = build_gloss(size)
 
     while _stack_height(all_rows(), gap) > available and surface_size > surface_lo:
         surface_size -= 1

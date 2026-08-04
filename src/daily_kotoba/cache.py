@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from daily_kotoba.render import RENDER_VERSION, render_card
+from daily_kotoba.render import RENDER_VERSION, TitleStyle, render_card
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +25,11 @@ def _day_dir(cache_dir: Path, day: dt.date) -> Path:
     return cache_dir / day.strftime("%Y-%m-%d")
 
 
-def _cache_path(cache_dir: Path, day: dt.date, width: int, height: int, title: str | None) -> Path:
-    # Hash the title rather than putting it in the filename: it is user-supplied and
-    # may contain CJK, spaces or path separators.
-    suffix = "" if not title else "-t" + hashlib.sha256(title.encode()).hexdigest()[:8]
+def _cache_path(cache_dir: Path, day: dt.date, width: int, height: int, title: TitleStyle) -> Path:
+    # TitleStyle is a closed enum, so its value is filename-safe and — more to the
+    # point — bounded: entries per day stay a small multiple of the size count,
+    # rather than growing with however many distinct titles a caller asks for.
+    suffix = "" if title is TitleStyle.NONE else f"-{title.value}"
     return _day_dir(cache_dir, day) / f"{width}x{height}{suffix}-v{RENDER_VERSION}.png"
 
 
@@ -57,7 +58,7 @@ def get_or_render(
     height: int,
     word,
     keep_days: int,
-    title: str | None = None,
+    title: TitleStyle = TitleStyle.NONE,
 ) -> CachedImage:
     path = _cache_path(cache_dir, day, width, height, title)
 

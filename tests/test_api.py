@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -115,3 +116,25 @@ def test_healthz_never_creates_selection(client: TestClient):
         r = client.get("/healthz")
         assert r.status_code == 200
         assert r.json()["selected_word_id"] is None
+
+
+def test_daily_png_rejects_unknown_title_style(client):
+    # A closed enum means bad input is a clean 422 rather than an arbitrary string
+    # reaching the renderer and minting a cache entry.
+    assert client.get("/v1/daily.png?title=../../etc/passwd").status_code == 422
+    assert client.get("/v1/daily.png?title=japanese").status_code == 422
+
+
+def test_title_cache_entries_are_bounded(client, seeded_db):
+    # Whatever a caller does, the number of distinct cache files per (day, size) is
+    # capped by the enum — this is what stops title values exhausting the disk.
+    from daily_kotoba.render import TitleStyle
+
+    for style in TitleStyle:
+        assert client.get(f"/v1/daily.png?w=370&h=233&title={style.value}").status_code == 200
+    for bogus in ("x", "y", "z"):
+        assert client.get(f"/v1/daily.png?w=370&h=233&title={bogus}").status_code == 422
+
+    cache_root = Path(seeded_db.cache_dir)
+    pngs = list(cache_root.rglob("370x233*.png"))
+    assert len(pngs) == len(TitleStyle)
