@@ -1,0 +1,61 @@
+# daily-kotoba — ESPHome reference snippet
+#
+# Merge the pieces below into your existing reTerminal E1001 config. The word half
+# of your display replaces whatever http_request + json::parse_json block you were
+# using to fetch/parse the word JSON — daily-kotoba does that server-side and hands
+# you back a ready-to-blit 1-bit PNG instead.
+
+substitutions:
+  kotoba_url: "http://kotoba.local:8000/v1/daily.png?w=760&h=300"
+
+# ESP32-S3 with 8 MB PSRAM — online_image needs both a download buffer and a
+# decoded framebuffer, so PSRAM is doing real work here.
+psram:
+  mode: octal
+  speed: 80MHz
+
+http_request:
+  verify_ssl: false
+
+online_image:
+  - id: kotoba_card
+    url: ${kotoba_url}
+    format: PNG
+    type: BINARY          # 1 bpp — matches the 1-bit PNG the service returns
+    resize: 760x300
+    update_interval: 6h
+    buffer_size: 32768
+    on_download_finished:
+      then:
+        - logger.log:
+            format: "Kotoba card updated (cached=%d)"
+            args: ["(int) cached"]
+        - component.update: epaper_display
+    on_error:
+      then:
+        # Deliberately leave the previous card on screen rather than blanking it —
+        # a transient network hiccup shouldn't erase today's word.
+        - logger.log: "Kotoba unavailable — keeping last card"
+
+display:
+  - platform: waveshare_epaper
+    id: epaper_display
+    model: 7.50inv2
+    # ... existing pin config ...
+    # MUST be set explicitly: the display default is 1s, which on e-paper means a
+    # full panel refresh every second — it would wreck the battery and age the
+    # panel. 300s keeps the clock roughly accurate; use `never` instead if you
+    # want refreshes driven purely by on_download_finished and a time trigger.
+    update_interval: 300s
+    lambda: |-
+      auto now = id(ntp_time).now();
+      if (!now.is_valid()) { now = id(rtc_time).now(); }
+
+      it.strftime(20, 18, id(font_medium), "%A %d %B", now);
+      it.strftime(780, 18, id(font_small), TextAlign::TOP_RIGHT, "%H:%M", now);
+      it.line(20, 58, 780, 58);
+
+      // Word of the day — server-rendered, no CJK glyphs in firmware
+      it.image(20, 76, id(kotoba_card));
+
+      // ... calendar block below ...
