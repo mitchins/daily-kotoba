@@ -127,6 +127,26 @@ def test_join_words_kana_only_detection():
     assert rows[0]["jlpt"] == "N5"
 
 
+def test_join_words_falls_back_to_surface_lookup():
+    # 経済 has no reading in the bank, so it only reaches by_surface. Without the
+    # by_pair -> by_surface fallback in _build_row this entry would be dropped.
+    by_pair, by_surface = parse_jlpt_banks(JLPT_BANKS)
+    assert ("経済", "けいざい") not in by_pair
+
+    entries = [
+        {
+            "id": "5",
+            "kanji": [{"common": True, "text": "経済", "tags": []}],
+            "kana": [{"common": True, "text": "けいざい", "tags": []}],
+            "sense": [_sense(["economy", "economics"], pos=("n",))],
+        }
+    ]
+    rows = join_words(entries, by_pair, by_surface)
+    assert len(rows) == 1
+    assert rows[0]["jlpt"] == "N2"
+    assert rows[0]["reading"] == "けいざい"
+
+
 def test_join_words_gloss_truncated_on_word_boundary():
     by_pair, by_surface = parse_jlpt_banks(JLPT_BANKS)
     long_gloss = "a" * 40 + " " + "b" * 40 + " " + "c" * 40  # > 100 chars total
@@ -139,10 +159,10 @@ def test_join_words_gloss_truncated_on_word_boundary():
         }
     ]
     rows = join_words(entries, by_pair, by_surface)
-    gloss = rows[0]["gloss"]
-    assert len(gloss) <= 101  # 100 chars + ellipsis char, trimmed to a word boundary
-    assert gloss.endswith("…")
-    assert " " not in gloss[-5:-1] or gloss[-2] != " "
+    # The 100-char cut lands mid-way through the "c" run, so the whole partial word
+    # is dropped rather than kept — assert the exact result, since a looser check
+    # also passes when a partial word survives.
+    assert rows[0]["gloss"] == "a" * 40 + " " + "b" * 40 + "…"
 
 
 def test_join_words_pos_mapping_and_verb_variants():
