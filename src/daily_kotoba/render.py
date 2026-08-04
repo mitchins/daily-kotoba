@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 # Bump whenever the layout changes; cache.py folds this into the cache path so stale
 # rendered art can never survive a deploy.
-RENDER_VERSION = 1
+RENDER_VERSION = 2
 
 _font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 
@@ -182,17 +182,18 @@ def render_card(word: Word, width: int, height: int) -> bytes:
         rows.append(_measure_row(draw, [reading], reading_font))
 
     surface_lo = max(1, round(scale * 0.12))
-    surface_hi = max(surface_lo, round(scale * 0.42))
+    surface_hi = max(surface_lo, round(scale * 0.36))
     surface_size = _fit_surface_size(draw, word.surface, bold, surface_lo, surface_hi, max_width)
     surface_row = _measure_row(draw, [word.surface], _get_font(bold, surface_size))
     rows.append(surface_row)
 
     # --- gloss (shrinkable) + pos (droppable) --------------------------------
-    gloss_size = max(1, round(scale * 0.10))
-    gloss_min_size = max(1, round(scale * 0.05))
+    gloss_size = max(1, round(scale * 0.135))
+    gloss_min_size = max(1, round(scale * 0.08))
 
     def build_gloss(size: int) -> dict:
-        font = _get_font(regular, size)
+        # Bold: the gloss competes with Inter@700 elsewhere on the board.
+        font = _get_font(bold, size)
         lines = _wrap_gloss(draw, word.gloss, font, max_width)
         return _measure_row(draw, lines, font)
 
@@ -200,7 +201,7 @@ def render_card(word: Word, width: int, height: int) -> bytes:
 
     pos_row: dict | None = None
     if word.pos:
-        pos_font = _get_font(regular, max(1, round(scale * 0.075)))
+        pos_font = _get_font(regular, max(1, round(scale * 0.10)))
         pos_row = _measure_row(draw, [f"({word.pos})"], pos_font)
 
     gap = max(1, round(scale * 0.03))
