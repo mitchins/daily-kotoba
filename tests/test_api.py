@@ -138,3 +138,30 @@ def test_title_cache_entries_are_bounded(client, seeded_db):
     cache_root = Path(seeded_db.cache_dir)
     pngs = list(cache_root.rglob("370x233*.png"))
     assert len(pngs) == len(TitleStyle)
+
+
+def test_cache_is_bounded_within_a_single_day(client, seeded_db):
+    # w/h span ~305k combinations and _prune only drops *expired* days, so without a
+    # per-day ceiling a client looping over sizes could fill the volume before the
+    # day rolls over.
+    from daily_kotoba.cache import MAX_ENTRIES_PER_DAY
+
+    for i in range(MAX_ENTRIES_PER_DAY + 20):
+        assert client.get(f"/v1/daily.png?w={200 + i}&h=200").status_code == 200
+
+    day_dirs = [d for d in Path(seeded_db.cache_dir).iterdir() if d.is_dir()]
+    assert len(day_dirs) == 1
+    assert len(list(day_dirs[0].glob("*.png"))) <= MAX_ENTRIES_PER_DAY
+
+
+def test_cache_eviction_keeps_the_most_recent_entries(client, seeded_db):
+    from daily_kotoba.cache import MAX_ENTRIES_PER_DAY
+
+    for i in range(MAX_ENTRIES_PER_DAY + 10):
+        client.get(f"/v1/daily.png?w={300 + i}&h=200")
+
+    day_dir = next(d for d in Path(seeded_db.cache_dir).iterdir() if d.is_dir())
+    names = {f.name for f in day_dir.glob("*.png")}
+    last = 300 + MAX_ENTRIES_PER_DAY + 9
+    assert any(str(last) in n for n in names)  # newest survived
+    assert not any(f"{300}x200-" in n for n in names)  # oldest evicted
