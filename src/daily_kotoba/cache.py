@@ -25,8 +25,11 @@ def _day_dir(cache_dir: Path, day: dt.date) -> Path:
     return cache_dir / day.strftime("%Y-%m-%d")
 
 
-def _cache_path(cache_dir: Path, day: dt.date, width: int, height: int) -> Path:
-    return _day_dir(cache_dir, day) / f"{width}x{height}-v{RENDER_VERSION}.png"
+def _cache_path(cache_dir: Path, day: dt.date, width: int, height: int, title: str | None) -> Path:
+    # Hash the title rather than putting it in the filename: it is user-supplied and
+    # may contain CJK, spaces or path separators.
+    suffix = "" if not title else "-t" + hashlib.sha256(title.encode()).hexdigest()[:8]
+    return _day_dir(cache_dir, day) / f"{width}x{height}{suffix}-v{RENDER_VERSION}.png"
 
 
 def _prune(cache_dir: Path, keep_days: int, today: dt.date) -> None:
@@ -48,14 +51,20 @@ def _prune(cache_dir: Path, keep_days: int, today: dt.date) -> None:
 
 
 def get_or_render(
-    cache_dir: Path, day: dt.date, width: int, height: int, word, keep_days: int
+    cache_dir: Path,
+    day: dt.date,
+    width: int,
+    height: int,
+    word,
+    keep_days: int,
+    title: str | None = None,
 ) -> CachedImage:
-    path = _cache_path(cache_dir, day, width, height)
+    path = _cache_path(cache_dir, day, width, height, title)
 
     if path.exists():
         data = path.read_bytes()
     else:
-        data = render_card(word, width, height)
+        data = render_card(word, width, height, title)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
         tmp.write_bytes(data)

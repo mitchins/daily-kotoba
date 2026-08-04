@@ -159,12 +159,18 @@ def get_daily_png(
     request: Request,
     w: int = Query(DEFAULT_WIDTH, ge=96, le=800),
     h: int = Query(DEFAULT_HEIGHT, ge=48, le=480),
+    title: str | None = Query(
+        None,
+        max_length=24,
+        description="Optional heading drawn top-left, opposite the JLPT badge. "
+        "Rendered server-side so it can contain kanji/kana (e.g. 日本語).",
+    ),
     session: Session = Depends(get_session),
 ) -> Response:
     settings = get_settings()
     day, word = _get_today_word(session, settings)
     cached = cache.get_or_render(
-        Path(settings.cache_dir), day, w, h, word, settings.cache_keep_days
+        Path(settings.cache_dir), day, w, h, word, settings.cache_keep_days, title
     )
     headers = {
         "ETag": cached.etag,

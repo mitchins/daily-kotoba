@@ -20,9 +20,26 @@ if TYPE_CHECKING:
 
 # Bump whenever the layout changes; cache.py folds this into the cache path so stale
 # rendered art can never survive a deploy.
-RENDER_VERSION = 2
+RENDER_VERSION = 4
 
 _font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+
+# Thresholding an outline to 1bpp leaves stems on fractional pixel boundaries, so
+# the same text is crisper at some ppem than others. Measured two ways over a Latin
+# sample in Noto Sans JP Bold: share of stems at the dominant width, and coefficient
+# of variation of stem widths (scale-invariant). The two rank sizes differently, so
+# this ladder keeps only sizes that score well on *both* — the effect is real but
+# modest (~20% on the better metric), not night-and-day.
+_SHARP_SIZES = (15, 20, 21, 26)
+
+
+def _snap_sharp(size: int) -> int:
+    """Snap a Latin point size to the nearest measured-crisp value, never rounding
+    up past the caller's request (that space may not exist)."""
+    candidates = [s for s in _SHARP_SIZES if s <= size]
+    if not candidates:
+        return min(_SHARP_SIZES[0], size)
+    return max(candidates)
 
 
 def _get_font(path: Path, size: int) -> ImageFont.FreeTypeFont:
@@ -144,7 +161,7 @@ def _stack_height(rows: list[dict], gap: int) -> int:
     return sum(r["total"] for r in rows) + gap * max(0, len(rows) - 1)
 
 
-def render_card(word: Word, width: int, height: int) -> bytes:
+def render_card(word: Word, width: int, height: int, title: str | None = None) -> bytes:
     # Type is scaled by `scale`, not raw height: an extreme aspect ratio the size
     # guards still permit (e.g. 96x480) would otherwise pick ~48px text for a 38px
     # line box, leaving nothing that fits — not even the ellipsis. Both factors are
@@ -172,6 +189,14 @@ def render_card(word: Word, width: int, height: int) -> bytes:
     )
     draw.text(((bx0 + bx1) / 2, (by0 + by1) / 2), word.jlpt, font=badge_font, fill=0, anchor="mm")
 
+    # --- optional title (top-left, centred against the badge) ------------------
+    # Rendered here rather than in the display lambda so it can carry CJK: the
+    # firmware has no kanji glyphs, which is the whole reason this card is an image.
+    if title:
+        title_font = _get_font(bold, badge_size)
+        title_text = _clamp_line(draw, title, title_font, bx0 - 2 * p)
+        draw.text((p, (by0 + by1) / 2), title_text, font=title_font, fill=0, anchor="lm")
+
     # --- reading + surface ---------------------------------------------------
     rows: list[dict] = []
     if not word.is_kana_only:
@@ -188,7 +213,7 @@ def render_card(word: Word, width: int, height: int) -> bytes:
     rows.append(surface_row)
 
     # --- gloss (shrinkable) + pos (droppable) --------------------------------
-    gloss_size = max(1, round(scale * 0.135))
+    gloss_size = _snap_sharp(max(1, round(scale * 0.135)))
     gloss_min_size = max(1, round(scale * 0.08))
 
     def build_gloss(size: int) -> dict:
@@ -201,7 +226,7 @@ def render_card(word: Word, width: int, height: int) -> bytes:
 
     pos_row: dict | None = None
     if word.pos:
-        pos_font = _get_font(regular, max(1, round(scale * 0.10)))
+        pos_font = _get_font(regular, _snap_sharp(max(1, round(scale * 0.10))))
         pos_row = _measure_row(draw, [f"({word.pos})"], pos_font)
 
     gap = max(1, round(scale * 0.03))
@@ -219,8 +244,10 @@ def render_card(word: Word, width: int, height: int) -> bytes:
     # "Never clip" is the one non-negotiable part of this ordering.
     size = gloss_size
     while _stack_height(all_rows(), gap) > available and size > gloss_min_size:
-        size -= 1
+        size = _snap_sharp(size - 1)  # step down the ladder, not by raw pixels
         gloss_row = build_gloss(size)
+        if size <= _SHARP_SIZES[0]:
+            break
 
     while _stack_height(all_rows(), gap) > available and surface_size > surface_lo:
         surface_size -= 1

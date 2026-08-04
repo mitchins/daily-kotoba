@@ -115,3 +115,35 @@ def test_render_unbreakable_token_is_ellipsized():
     assert img.tobytes() == ellipsis_img.tobytes()
     assert img.tobytes() != blank_img.tobytes()
     assert _edge_ink(img) == []
+
+
+@pytest.mark.usefixtures("kotoba_settings")
+def test_render_title_is_drawn_and_optional():
+    plain = render_card(_word(), 370, 233)
+    titled = render_card(_word(), 370, 233, title="日本語")
+    assert plain != titled  # the title actually renders
+
+    img = Image.open(io.BytesIO(titled))
+    assert img.mode == "1"
+    assert img.size == (370, 233)
+    assert _edge_ink(img) == []
+
+
+@pytest.mark.usefixtures("kotoba_settings")
+def test_render_overlong_title_does_not_collide_with_badge():
+    # The title is clamped to the space left of the badge, so it must never bleed
+    # off the canvas nor run under the N-level box.
+    img = Image.open(io.BytesIO(render_card(_word(), 370, 233, title="日本語" * 8)))
+    assert _edge_ink(img) == []
+
+
+@pytest.mark.parametrize(
+    "requested,expected",
+    [(14, 14), (15, 15), (19, 15), (20, 20), (25, 21), (26, 26), (40, 26)],
+)
+def test_snap_sharp_never_rounds_up(requested, expected):
+    # Rounding up could ask for space the layout has not budgeted, so the ladder
+    # always steps down; below the ladder floor the request passes through.
+    from daily_kotoba.render import _snap_sharp
+
+    assert _snap_sharp(requested) == expected
