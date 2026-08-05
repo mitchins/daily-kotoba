@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from daily_kotoba import cache, db, selection
 from daily_kotoba.config import Settings, get_settings
 from daily_kotoba.models import Meta, Selection, Word
+from daily_kotoba.render import TitleStyle
 
 logger = logging.getLogger(__name__)
 
@@ -159,12 +160,17 @@ def get_daily_png(
     request: Request,
     w: int = Query(DEFAULT_WIDTH, ge=96, le=800),
     h: int = Query(DEFAULT_HEIGHT, ge=48, le=480),
+    title: TitleStyle = Query(
+        TitleStyle.NONE,
+        description="Heading drawn top-left, opposite the JLPT badge. 'ja' renders "
+        "日本語 — server-side, so it works despite the firmware having no CJK glyphs.",
+    ),
     session: Session = Depends(get_session),
 ) -> Response:
     settings = get_settings()
     day, word = _get_today_word(session, settings)
     cached = cache.get_or_render(
-        Path(settings.cache_dir), day, w, h, word, settings.cache_keep_days
+        Path(settings.cache_dir), day, w, h, word, settings.cache_keep_days, title
     )
     headers = {
         "ETag": cached.etag,

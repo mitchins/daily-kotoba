@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 
 from daily_kotoba.models import Word
-from daily_kotoba.render import render_card
+from daily_kotoba.render import TitleStyle, render_card
 
 
 def _word(**overrides) -> Word:
@@ -115,3 +115,44 @@ def test_render_unbreakable_token_is_ellipsized():
     assert img.tobytes() == ellipsis_img.tobytes()
     assert img.tobytes() != blank_img.tobytes()
     assert _edge_ink(img) == []
+
+
+@pytest.mark.usefixtures("kotoba_settings")
+def test_render_title_is_drawn_and_optional():
+    plain = render_card(_word(), 370, 233)
+    titled = render_card(_word(), 370, 233, title=TitleStyle.JA)
+    assert plain != titled  # the title actually renders
+
+    img = Image.open(io.BytesIO(titled))
+    assert img.mode == "1"
+    assert img.size == (370, 233)
+    assert _edge_ink(img) == []
+
+
+@pytest.mark.usefixtures("kotoba_settings")
+@pytest.mark.parametrize("style", list(TitleStyle))
+@pytest.mark.parametrize("width,height", [(370, 233), (96, 48), (800, 480)])
+def test_render_every_title_style_stays_inside_the_canvas(style, width, height):
+    # The title is clamped to the space left of the badge, so no style may bleed off
+    # the canvas or run under the N-level box, at any permitted size.
+    img = Image.open(io.BytesIO(render_card(_word(), width, height, title=style)))
+    assert img.size == (width, height)
+    assert _edge_ink(img) == []
+
+
+@pytest.mark.usefixtures("kotoba_settings")
+def test_render_title_styles_are_distinct():
+    seen = {s: render_card(_word(), 370, 233, title=s) for s in TitleStyle}
+    assert len(set(seen.values())) == len(TitleStyle)
+
+
+@pytest.mark.parametrize(
+    "requested,expected",
+    [(14, 14), (15, 15), (19, 15), (20, 20), (25, 21), (26, 26), (40, 26)],
+)
+def test_snap_sharp_never_rounds_up(requested, expected):
+    # Rounding up could ask for space the layout has not budgeted, so the ladder
+    # always steps down; below the ladder floor the request passes through.
+    from daily_kotoba.render import _snap_sharp
+
+    assert _snap_sharp(requested) == expected

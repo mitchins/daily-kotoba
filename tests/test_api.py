@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -115,3 +116,83 @@ def test_healthz_never_creates_selection(client: TestClient):
         r = client.get("/healthz")
         assert r.status_code == 200
         assert r.json()["selected_word_id"] is None
+
+
+def test_daily_png_rejects_unknown_title_style(client):
+    # A closed enum means bad input is a clean 422 rather than an arbitrary string
+    # reaching the renderer and minting a cache entry.
+    assert client.get("/v1/daily.png?title=../../etc/passwd").status_code == 422
+    assert client.get("/v1/daily.png?title=japanese").status_code == 422
+
+
+def test_title_cache_entries_are_bounded(client, seeded_db):
+    # Whatever a caller does, the number of distinct cache files per (day, size) is
+    # capped by the enum — this is what stops title values exhausting the disk.
+    from daily_kotoba.render import TitleStyle
+
+    for style in TitleStyle:
+        assert client.get(f"/v1/daily.png?w=370&h=233&title={style.value}").status_code == 200
+    for bogus in ("x", "y", "z"):
+        assert client.get(f"/v1/daily.png?w=370&h=233&title={bogus}").status_code == 422
+
+    cache_root = Path(seeded_db.cache_dir)
+    pngs = list(cache_root.rglob("370x233*.png"))
+    assert len(pngs) == len(TitleStyle)
+
+
+def test_cache_is_bounded_within_a_single_day(client, seeded_db):
+    # w/h span ~305k combinations and _prune only drops *expired* days, so without a
+    # per-day ceiling a client looping over sizes could fill the volume before the
+    # day rolls over.
+    from daily_kotoba.cache import MAX_ENTRIES_PER_DAY
+
+    for i in range(MAX_ENTRIES_PER_DAY + 20):
+        assert client.get(f"/v1/daily.png?w={200 + i}&h=200").status_code == 200
+
+    day_dirs = [d for d in Path(seeded_db.cache_dir).iterdir() if d.is_dir()]
+    assert len(day_dirs) == 1
+    assert len(list(day_dirs[0].glob("*.png"))) <= MAX_ENTRIES_PER_DAY
+
+
+def test_cache_eviction_keeps_the_most_recent_entries(client, seeded_db):
+    from daily_kotoba.cache import MAX_ENTRIES_PER_DAY
+
+    for i in range(MAX_ENTRIES_PER_DAY + 10):
+        client.get(f"/v1/daily.png?w={300 + i}&h=200")
+
+    day_dir = next(d for d in Path(seeded_db.cache_dir).iterdir() if d.is_dir())
+    names = {f.name for f in day_dir.glob("*.png")}
+    last = 300 + MAX_ENTRIES_PER_DAY + 9
+    assert any(str(last) in n for n in names)  # newest survived
+    assert not any(f"{300}x200-" in n for n in names)  # oldest evicted
+
+
+def test_cache_read_survives_concurrent_eviction(client, seeded_db, monkeypatch):
+    """A cache hit must not 500 when the entry is evicted mid-request.
+
+    The window is real: _enforce_day_quota runs inside whichever request happens to
+    be writing, so it can unlink an entry another request is already serving. This
+    patches Path.read_bytes rather than any internal helper, so it fails against an
+    implementation that checks existence and then reads.
+    """
+    client.get("/v1/daily.png?w=310&h=210")  # populate the entry
+
+    real_read_bytes = Path.read_bytes
+    fired = {"done": False}
+
+    def vanishing_read(self):
+        # First read of a cached PNG behaves as if a concurrent quota sweep just
+        # unlinked it, which is precisely the TOCTOU window.
+        if not fired["done"] and self.suffix == ".png":
+            fired["done"] = True
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", vanishing_read)
+
+    r = client.get("/v1/daily.png?w=310&h=210")
+    assert fired["done"], "the simulated eviction never triggered"
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert len(r.content) > 0
+    assert r.headers["ETag"] and r.headers["Last-Modified"]
