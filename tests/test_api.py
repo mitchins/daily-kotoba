@@ -125,6 +125,37 @@ def test_daily_png_rejects_unknown_title_style(client):
     assert client.get("/v1/daily.png?title=japanese").status_code == 422
 
 
+def test_daily_png_polarity_is_part_of_the_cache_key(client, seeded_db):
+    # The two polarities share a day and a size, so if polarity were left out of the
+    # cache path the second request would be served the first one's bytes — and the
+    # device would silently get a card with its ink and paper the wrong way round.
+    positive = client.get("/v1/daily.png?w=370&h=233&polarity=positive")
+    mask = client.get("/v1/daily.png?w=370&h=233&polarity=mask")
+    assert positive.status_code == mask.status_code == 200
+    assert positive.content != mask.content
+    assert positive.headers["ETag"] != mask.headers["ETag"]
+
+    # Order must not matter either: re-requesting the first must not now return the
+    # second's cached bytes.
+    assert client.get("/v1/daily.png?w=370&h=233&polarity=positive").content == positive.content
+
+    assert len(list(Path(seeded_db.cache_dir).rglob("370x233*.png"))) == 2
+
+
+def test_daily_png_defaults_to_positive(client):
+    # The device's URL omits polarity today; the default must stay the human-facing
+    # one, so an existing deployment cannot be flipped by adding the parameter.
+    assert (
+        client.get("/v1/daily.png?w=370&h=233").content
+        == client.get("/v1/daily.png?w=370&h=233&polarity=positive").content
+    )
+
+
+def test_daily_png_rejects_unknown_polarity(client):
+    assert client.get("/v1/daily.png?polarity=inverted").status_code == 422
+    assert client.get("/v1/daily.png?polarity=1").status_code == 422
+
+
 def test_title_cache_entries_are_bounded(client, seeded_db):
     # Whatever a caller does, the number of distinct cache files per (day, size) is
     # capped by the enum — this is what stops title values exhausting the disk.

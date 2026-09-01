@@ -45,8 +45,17 @@ All settings are environment variables, prefix `KOTOBA_`:
 |---|---|---|
 | `GET` | `/healthz` | read-only status; never mints the day's word |
 | `GET` | `/v1/daily.json` | today's word + image URL |
-| `GET` | `/v1/daily.png?w=&h=` | the 1-bit word card (`w`: 96–800, `h`: 48–480) |
+| `GET` | `/v1/daily.png?w=&h=&title=&polarity=` | the 1-bit word card (`w`: 96–800, `h`: 48–480) |
 | `GET` | `/v1/history?limit=` | last N selections, newest first (1–100, default 30) |
+
+`title` (`none` \| `ja` \| `en`) draws a heading opposite the JLPT badge. `ja`
+renders 日本語 into the image, which is the only way to get it onto a display whose
+firmware has no CJK glyphs.
+
+`polarity` (`positive` \| `mask`) chooses which pixel value is ink. `positive` is
+black ink on white paper. `mask` is the exact complement, for clients that read a
+1-bit image as an alpha mask rather than as a picture — see the ESPHome note below.
+Both are closed enums so the per-day cache stays bounded.
 
 Example card at the default 760×300:
 
@@ -77,6 +86,14 @@ single `online_image`. Two things worth knowing:
   ESP32-S3 that's why PSRAM (octal mode) matters here.
 - The `on_error` handler deliberately leaves the previous card on screen rather than
   blanking it, so a transient network hiccup doesn't wipe today's word.
+- **Drawing from a `display:` lambda wants `polarity=positive`** (the default), with
+  `it.image(x, y, id(card), COLOR_OFF, COLOR_ON)`. The swapped arguments are not a
+  typo: ESPHome's BINARY decoder sets a bit for *bright* pixels, so without the swap
+  the paper is inked and the glyphs are left blank.
+- **Drawing from LVGL wants `polarity=mask`.** LVGL receives a BINARY image as
+  `LV_COLOR_FORMAT_A1` — alpha only — and an image widget has no equivalent of those
+  two colour arguments, so the polarity has to be right on arrival. Pair it with
+  `image_recolor` set to whatever your page uses for ink.
 
 ## Attribution
 

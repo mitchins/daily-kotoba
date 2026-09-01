@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from daily_kotoba import cache, db, selection
 from daily_kotoba.config import Settings, get_settings
 from daily_kotoba.models import Meta, Selection, Word
-from daily_kotoba.render import TitleStyle
+from daily_kotoba.render import Polarity, TitleStyle
 
 logger = logging.getLogger(__name__)
 
@@ -165,12 +165,19 @@ def get_daily_png(
         description="Heading drawn top-left, opposite the JLPT badge. 'ja' renders "
         "日本語 — server-side, so it works despite the firmware having no CJK glyphs.",
     ),
+    polarity: Polarity = Query(
+        Polarity.POSITIVE,
+        description="Which pixel value is ink. 'positive' is black ink on white "
+        "paper. 'mask' emits the complement, for clients that read a 1-bit image as "
+        "an alpha mask — ESPHome hands a BINARY online_image to LVGL that way, and "
+        "its decoder treats bright pixels as set.",
+    ),
     session: Session = Depends(get_session),
 ) -> Response:
     settings = get_settings()
     day, word = _get_today_word(session, settings)
     cached = cache.get_or_render(
-        Path(settings.cache_dir), day, w, h, word, settings.cache_keep_days, title
+        Path(settings.cache_dir), day, w, h, word, settings.cache_keep_days, title, polarity
     )
     headers = {
         "ETag": cached.etag,
