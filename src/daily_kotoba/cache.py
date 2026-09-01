@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from daily_kotoba.render import RENDER_VERSION, TitleStyle, render_card
+from daily_kotoba.render import RENDER_VERSION, Polarity, TitleStyle, render_card
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +30,20 @@ def _day_dir(cache_dir: Path, day: dt.date) -> Path:
     return cache_dir / day.strftime("%Y-%m-%d")
 
 
-def _cache_path(cache_dir: Path, day: dt.date, width: int, height: int, title: TitleStyle) -> Path:
-    # TitleStyle is a closed enum, so its value is filename-safe and — more to the
+def _cache_path(
+    cache_dir: Path,
+    day: dt.date,
+    width: int,
+    height: int,
+    title: TitleStyle,
+    polarity: Polarity,
+) -> Path:
+    # Both are closed enums, so their values are filename-safe and — more to the
     # point — bounded: entries per day stay a small multiple of the size count,
-    # rather than growing with however many distinct titles a caller asks for.
+    # rather than growing with however many distinct variants a caller asks for.
     suffix = "" if title is TitleStyle.NONE else f"-{title.value}"
+    if polarity is not Polarity.POSITIVE:
+        suffix += f"-{polarity.value}"
     return _day_dir(cache_dir, day) / f"{width}x{height}{suffix}-v{RENDER_VERSION}.png"
 
 
@@ -103,8 +112,9 @@ def get_or_render(
     word,
     keep_days: int,
     title: TitleStyle = TitleStyle.NONE,
+    polarity: Polarity = Polarity.POSITIVE,
 ) -> CachedImage:
-    path = _cache_path(cache_dir, day, width, height, title)
+    path = _cache_path(cache_dir, day, width, height, title, polarity)
 
     # No exists() check: it would be a TOCTOU gap. A concurrent request can trip the
     # per-day quota and evict this very file between the check and the read, so the
@@ -113,7 +123,7 @@ def get_or_render(
     if hit is not None:
         data, mtime = hit
     else:
-        data = render_card(word, width, height, title)
+        data = render_card(word, width, height, title, polarity)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
         tmp.write_bytes(data)

@@ -43,6 +43,26 @@ _TITLE_TEXT: dict[TitleStyle, str | None] = {
     TitleStyle.EN: "JAPANESE",
 }
 
+
+class Polarity(StrEnum):
+    """Which pixel value carries the ink in the emitted PNG.
+
+    POSITIVE is what a human expects to see. MASK exists because a 1-bit image is
+    not always consumed as a picture: ESPHome hands a BINARY `online_image` to LVGL
+    as LV_COLOR_FORMAT_A1 — alpha only — and its decoder sets a bit for *bright*
+    pixels. A positive card therefore arrives with its paper opaque and its glyphs
+    punched out as holes, and an LVGL image widget has no equivalent of
+    `it.image()`'s COLOR_OFF/COLOR_ON to swap them back. MASK emits the card the way
+    an alpha mask is read: set bits are ink.
+
+    Named for the axis it moves rather than "invert", which says what happens to the
+    bytes but not why anyone would want it.
+    """
+
+    POSITIVE = "positive"
+    MASK = "mask"
+
+
 _font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 
 # Thresholding an outline to 1bpp leaves stems on fractional pixel boundaries, so
@@ -321,7 +341,13 @@ def _paint_rows(
         y += row["total"] + gap
 
 
-def render_card(word: Word, width: int, height: int, title: TitleStyle = TitleStyle.NONE) -> bytes:
+def render_card(
+    word: Word,
+    width: int,
+    height: int,
+    title: TitleStyle = TitleStyle.NONE,
+    polarity: Polarity = Polarity.POSITIVE,
+) -> bytes:
     # Type is scaled by `scale`, not raw height: an extreme aspect ratio the size
     # guards still permit (e.g. 96x480) would otherwise pick ~48px text for a 38px
     # line box, leaving nothing that fits — not even the ellipsis. Both factors are
@@ -362,7 +388,11 @@ def render_card(word: Word, width: int, height: int, title: TitleStyle = TitleSt
     _paint_rows(draw, final_rows, width, body_top, available, gap)
 
     # Hard threshold, never dithered: text on a 1-bit e-paper panel needs crisp edges.
-    bw = canvas.point(lambda v: 255 if v >= 128 else 0, mode="1")
+    # Polarity is folded into this same pass rather than inverting afterwards, so a
+    # mask is bit-for-bit the complement of a positive card — there is no second
+    # quantisation that could soften an edge.
+    paper, ink = (0, 255) if polarity is Polarity.MASK else (255, 0)
+    bw = canvas.point(lambda v: paper if v >= 128 else ink, mode="1")
     buf = io.BytesIO()
     bw.save(buf, format="PNG", optimize=True)
     return buf.getvalue()

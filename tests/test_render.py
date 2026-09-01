@@ -3,10 +3,10 @@ from __future__ import annotations
 import io
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 from daily_kotoba.models import Word
-from daily_kotoba.render import TitleStyle, render_card
+from daily_kotoba.render import Polarity, TitleStyle, render_card
 
 
 def _word(**overrides) -> Word:
@@ -64,6 +64,19 @@ def test_render_long_gloss_wraps_without_crashing():
     img = Image.open(io.BytesIO(png_bytes))
     assert img.mode == "1"
     assert img.size == (400, 200)
+
+
+def _render_l(width: int, height: int, **kwargs) -> Image.Image:
+    """Render a card and widen it to 8bpp for pixel comparison.
+
+    Mode "1" packs rows to whole bytes, so the trailing padding bits of a row are
+    not pixels and do not invert with them — a bytewise compare of the packed form
+    would be wrong for any width that is not a multiple of 8.
+    """
+    img = Image.open(io.BytesIO(render_card(_word(), width, height, **kwargs)))
+    assert img.mode == "1"
+    assert img.size == (width, height)
+    return img.convert("L")
 
 
 def _edge_ink(img: Image.Image, margin: int = 2) -> list[tuple[int, int]]:
@@ -138,6 +151,32 @@ def test_render_every_title_style_stays_inside_the_canvas(style, width, height):
     img = Image.open(io.BytesIO(render_card(_word(), width, height, title=style)))
     assert img.size == (width, height)
     assert _edge_ink(img) == []
+
+
+@pytest.mark.usefixtures("kotoba_settings")
+@pytest.mark.parametrize("width,height", [(370, 233), (96, 48), (800, 480)])
+def test_render_mask_is_the_exact_complement_of_positive(width, height):
+    # The whole contract of the mask: same layout, every pixel flipped. Asserted
+    # structurally rather than by counting ink, so it holds at any size and cannot
+    # be satisfied by a card that merely happens to be mostly dark.
+    positive = _render_l(width, height, polarity=Polarity.POSITIVE)
+    mask = _render_l(width, height, polarity=Polarity.MASK)
+    # Guards against a blank card satisfying the complement check vacuously.
+    assert set(positive.tobytes()) == {0, 255}
+    assert mask.tobytes() == ImageChops.invert(positive).tobytes()
+
+
+@pytest.mark.usefixtures("kotoba_settings")
+def test_render_mask_composes_with_title():
+    # polarity and title are independent axes; a mask must still carry the heading.
+    plain = render_card(_word(), 370, 233, polarity=Polarity.MASK)
+    titled = render_card(_word(), 370, 233, title=TitleStyle.JA, polarity=Polarity.MASK)
+    assert plain != titled
+
+    positive = _render_l(370, 233, title=TitleStyle.JA)
+    assert Image.open(io.BytesIO(titled)).convert("L").tobytes() == (
+        ImageChops.invert(positive).tobytes()
+    )
 
 
 @pytest.mark.usefixtures("kotoba_settings")
